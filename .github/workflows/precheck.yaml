@@ -11,11 +11,12 @@ jobs:
     env:
       PYTHONIOENCODING: utf-8
       PDK_ROOT: /home/runner/pdk
+      KLAYOUT_VERSION: 0.29.12
+      MAGIC_VERSION: 8.3.471
+      GOLDEN_CARAVEL: ${{ github.workspace }}/caravel
 
-    # ubuntu
     runs-on: ubuntu-24.04
     steps:
-      # need the repo checked out
       - name: checkout repo
         uses: actions/checkout@v4
         with:
@@ -24,11 +25,24 @@ jobs:
       - name: Load LibreLane environment variables
         run: cat .github/config/librelane.txt | tee -a $GITHUB_ENV
 
-      - name: Checkout Precheck Repo
-        uses: actions/checkout@v4
-        with:
-          repository: chipfoundry/mpw_precheck
-          path: mpw_precheck
+      - name: Install KLayout
+        run: |
+          wget https://github.com/TinyTapeout/klayout/releases/download/v${KLAYOUT_VERSION}/klayout_${KLAYOUT_VERSION}-1_amd64.deb
+          sudo apt-get update
+          sudo apt-get install -y ./klayout_${KLAYOUT_VERSION}-1_amd64.deb
+          pip install klayout==${KLAYOUT_VERSION}
+
+      - name: Install magic VLSI
+        run: |
+          sudo apt-get install -y m4 python3 libx11-dev tcl-dev tk-dev libcairo2-dev mesa-common-dev libglu1-mesa-dev
+          git clone -b ${MAGIC_VERSION} https://github.com/RTimothyEdwards/magic magic
+          cd magic
+          ./configure
+          make -j4
+          sudo make install
+
+      - name: Install cf-precheck
+        run: pip install cf-precheck
 
       - name: Install Sky130 PDK
         uses: TinyTapeout/ciel-action@v1
@@ -36,6 +50,15 @@ jobs:
           pdk_name: sky130
           pdk_version: ${{ env.SKY130_PDK_VERSION }}
           pdk_root: ${{ env.PDK_ROOT }}
+
+      - name: Checkout Caravel
+        uses: actions/checkout@v4
+        with:
+          repository: chipfoundry/caravel
+          path: ${{ env.GOLDEN_CARAVEL }}
+
+      - name: Uncompress Caravel GDS
+        run: make -C ${{ env.GOLDEN_CARAVEL }} uncompress
 
       - name: Download artifact (run id = ${{ github.event.workflow_run.id }})
         uses: dawidd6/action-download-artifact@v6
@@ -48,24 +71,12 @@ jobs:
           path: tinytapeout-submission
 
       - name: Run precheck (run id = ${{ fromJSON(steps.download_artifact.outputs.artifacts)[0].workflow_run.id }})
-        working-directory: mpw_precheck
         run: |
-          docker run -v $(pwd):/opt/mpw_precheck \
-            -v "$INPUT_DIRECTORY":"$INPUT_DIRECTORY" -v "$PDK_PATH":"$PDK_PATH" \
-            -e INPUT_DIRECTORY="$INPUT_DIRECTORY" -e PDK_PATH="$PDK_PATH" -e PDK_ROOT="$PDK_ROOT" \
-            -u $(id -u "$USER"):$(id -g "$USER") \
-            -w /opt/mpw_precheck \
-            chipfoundry/mpw_precheck:latest ./run_precheck.sh --private --skip_checks $SKIP_CHECKS
-        env:
-          # magic_drc - it's slow and we're already running it in the gds job
-          # lvs - slow, currently failing (GL netlist doesn't include user modules), and we're already doing LVS in the gds job
-          # makefile - we're not using the Makefile in the submission, so we can skip it
-          SKIP_CHECKS: |
-            magic_drc 
-            lvs
-            makefile
-          PDK_PATH: ${{ env.PDK_ROOT }}/sky130A
-          INPUT_DIRECTORY: ${{ github.workspace }}/tinytapeout-submission
+          cf-precheck \
+            -i ${{ github.workspace }}/tinytapeout-submission \
+            -p ${{ env.PDK_ROOT }}/sky130A \
+            -c ${{ env.GOLDEN_CARAVEL }} \
+            --skip-checks lvs makefile
 
       - name: Upload precheck results
         uses: actions/upload-artifact@v4
